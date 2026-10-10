@@ -103,6 +103,109 @@ func initHelm() []api.ServerTool {
 				OpenWorldHint:   ptr.To(true),
 			},
 		}, RBAC: api.RBACUnbounded("Permissions depend on resources contained in the installed Helm release"), Handler: helmUninstall},
+		{Tool: api.Tool{
+			Name: "helm_upgrade",
+			Description: "Upgrade an existing Helm release to a chart version and/or new values in the current or provided namespace. " +
+				"By default the release's current values are kept and the provided values are merged over them (like helm upgrade --reuse-values)",
+			InputSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"name": {
+						Type:        "string",
+						Description: "Name of the Helm release to upgrade",
+					},
+					"chart": {
+						Type:        "string",
+						Description: "Chart reference to upgrade to (for example: stable/grafana, oci://ghcr.io/nginxinc/charts/nginx-ingress, https://example.com/charts/app-1.2.3.tgz)",
+					},
+					"version": {
+						Type:        "string",
+						Description: "Chart version to upgrade to, for repository and OCI references (Optional, latest if not provided)",
+					},
+					"values": {
+						Type:        "object",
+						Description: "Values to set on the release (Optional). Merged over the current values unless reuse_values is false",
+						Properties:  make(map[string]*jsonschema.Schema),
+					},
+					"reuse_values": {
+						Type:        "boolean",
+						Description: "Keep the release's current values and merge the provided values over them (Optional, default true). If false, only the chart defaults plus the provided values are used",
+					},
+					"namespace": {
+						Type:        "string",
+						Description: "Namespace of the Helm release (Optional, current namespace if not provided)",
+					},
+				},
+				Required: []string{"name", "chart"},
+			},
+			Annotations: api.ToolAnnotations{
+				Title:           "Helm: Upgrade",
+				DestructiveHint: ptr.To(true),
+				IdempotentHint:  ptr.To(false),
+				OpenWorldHint:   ptr.To(true),
+			},
+		}, RBAC: api.RBACUnbounded("Permissions depend on resources contained in the referenced Helm chart"), Handler: helmUpgrade},
+		{Tool: api.Tool{
+			Name:        "helm_rollback",
+			Description: "Roll back a Helm release to a previous revision in the current or provided namespace",
+			InputSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"name": {
+						Type:        "string",
+						Description: "Name of the Helm release to roll back",
+					},
+					"revision": {
+						Type:        "integer",
+						Description: "Revision to roll back to (Optional, the previous revision if not provided). See helm_history",
+					},
+					"namespace": {
+						Type:        "string",
+						Description: "Namespace of the Helm release (Optional, current namespace if not provided)",
+					},
+				},
+				Required: []string{"name"},
+			},
+			Annotations: api.ToolAnnotations{
+				Title:           "Helm: Rollback",
+				DestructiveHint: ptr.To(true),
+				IdempotentHint:  ptr.To(false),
+				OpenWorldHint:   ptr.To(true),
+			},
+		}, RBAC: api.RBACUnbounded("Permissions depend on resources contained in the Helm release"), Handler: helmRollback},
+		{Tool: api.Tool{
+			Name:        "helm_history",
+			Description: "List the revisions of a Helm release (chart version, status and description of each) in the current or provided namespace",
+			InputSchema: &jsonschema.Schema{
+				Type: "object",
+				Properties: map[string]*jsonschema.Schema{
+					"name": {
+						Type:        "string",
+						Description: "Name of the Helm release",
+					},
+					"max": {
+						Type:        "integer",
+						Description: "Maximum number of most recent revisions to return (Optional, all if not provided)",
+					},
+					"namespace": {
+						Type:        "string",
+						Description: "Namespace of the Helm release (Optional, current namespace if not provided)",
+					},
+				},
+				Required: []string{"name"},
+			},
+			Annotations: api.ToolAnnotations{
+				Title:           "Helm: History",
+				ReadOnlyHint:    ptr.To(true),
+				DestructiveHint: ptr.To(false),
+				OpenWorldHint:   ptr.To(true),
+			},
+		}, RBAC: api.RBACBounded(
+			api.RBACRequirement{
+				Verbs:  []string{"list"},
+				Target: api.RBACTarget{Resource: &api.RBACResourceTarget{Resource: "secrets"}},
+			},
+		), Handler: helmHistory},
 	}
 }
 
@@ -170,4 +273,58 @@ func helmUninstall(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
 		return api.NewToolCallResult("", fmt.Errorf("failed to uninstall helm chart '%s': %w", name, err)), nil
 	}
 	return api.NewToolCallResult(ret, err), nil
+}
+
+func helmUpgrade(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
+	p := api.WrapParams(params)
+	name := p.RequiredString("name")
+	chart := p.RequiredString("chart")
+	version := p.OptionalString("version", "")
+	reuseValues := p.OptionalBool("reuse_values", true)
+	namespace := p.OptionalString("namespace", "")
+	if err := p.Err(); err != nil {
+		return api.NewToolCallResult("", fmt.Errorf("failed to upgrade helm release: %w", err)), nil
+	}
+	values := map[string]interface{}{}
+	if v, ok := params.GetArguments()["values"].(map[string]interface{}); ok {
+		values = v
+	}
+	ret, err := newHelmClient(params).Upgrade(params, name, chart, version, values, namespace, reuseValues)
+	if err != nil {
+		return api.NewToolCallResult("", fmt.Errorf("failed to upgrade helm release '%s': %w", name, err)), nil
+	}
+	return api.NewToolCallResult(ret, nil), nil
+}
+
+func helmRollback(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
+	p := api.WrapParams(params)
+	name := p.RequiredString("name")
+	revision := p.OptionalInt64("revision", 0)
+	namespace := p.OptionalString("namespace", "")
+	if err := p.Err(); err != nil {
+		return api.NewToolCallResult("", fmt.Errorf("failed to roll back helm release: %w", err)), nil
+	}
+	if revision < 0 {
+		return api.NewToolCallResult("", fmt.Errorf("failed to roll back helm release: revision must not be negative")), nil
+	}
+	ret, err := newHelmClient(params).Rollback(params.Context, name, int(revision), namespace)
+	if err != nil {
+		return api.NewToolCallResult("", fmt.Errorf("failed to roll back helm release '%s': %w", name, err)), nil
+	}
+	return api.NewToolCallResult(ret, nil), nil
+}
+
+func helmHistory(params api.ToolHandlerParams) (*api.ToolCallResult, error) {
+	p := api.WrapParams(params)
+	name := p.RequiredString("name")
+	max := p.OptionalInt64("max", 0)
+	namespace := p.OptionalString("namespace", "")
+	if err := p.Err(); err != nil {
+		return api.NewToolCallResult("", fmt.Errorf("failed to get helm release history: %w", err)), nil
+	}
+	ret, err := newHelmClient(params).History(params.Context, name, namespace, int(max))
+	if err != nil {
+		return api.NewToolCallResult("", fmt.Errorf("failed to get helm release history '%s': %w", name, err)), nil
+	}
+	return api.NewToolCallResult(ret, nil), nil
 }

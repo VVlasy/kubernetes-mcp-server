@@ -15,6 +15,7 @@ import (
 	"github.com/containers/kubernetes-mcp-server/internal/test"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/suite"
+	"helm.sh/helm/v3/pkg/storage/driver"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -354,6 +355,153 @@ func (s *HelmSuite) TestHelmListForbidden() {
 			s.Contains(logNotification.Data, "Permission denied", "log message should indicate permission denied")
 		})
 	})
+}
+
+func (s *HelmSuite) installNoOp(name string) string {
+	_, file, _, _ := runtime.Caller(0)
+	chartPath := filepath.Join(filepath.Dir(file), "testdata", "helm-chart-no-op")
+	toolResult, err := s.CallTool("helm_install", map[string]interface{}{
+		"chart":  chartPath,
+		"name":   name,
+		"values": map[string]interface{}{"keep": "original", "replace": "old"},
+	})
+	s.Require().NoError(err)
+	s.Require().Falsef(toolResult.IsError, "install failed: %v", toolResult.Content)
+	return chartPath
+}
+
+func (s *HelmSuite) releaseValues(name string, revision int) map[string]interface{} {
+	secrets := driver.NewSecrets(kubernetes.NewForConfigOrDie(test.EnvTestRestConfig()).CoreV1().Secrets("default"))
+	rel, err := secrets.Get("sh.helm.release.v1." + name + ".v" + strconv.Itoa(revision))
+	s.Require().NoError(err)
+	return rel.Config
+}
+
+func (s *HelmSuite) TestHelmUpgrade() {
+	s.InitMcpClient()
+	chartPath := s.installNoOp("release-to-upgrade")
+	s.Run("helm_upgrade(name=release-to-upgrade) merges values over the current ones", func() {
+		toolResult, err := s.CallTool("helm_upgrade", map[string]interface{}{
+			"name":   "release-to-upgrade",
+			"chart":  chartPath,
+			"values": map[string]interface{}{"replace": "new", "added": "yes"},
+		})
+		s.Run("no error", func() {
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(toolResult.IsError, "call tool failed: %v", toolResult.Content)
+		})
+		s.Run("returns upgraded release at revision 2", func() {
+			var decoded []map[string]interface{}
+			s.Require().NoError(yaml.Unmarshal([]byte(toolResult.Content[0].(*mcp.TextContent).Text), &decoded))
+			s.Require().Len(decoded, 1)
+			s.Equal("release-to-upgrade", decoded[0]["name"])
+			s.Equal(float64(2), decoded[0]["revision"])
+			s.Equal("deployed", decoded[0]["status"])
+		})
+		s.Run("keeps unchanged values", func() {
+			s.Equal(map[string]interface{}{"keep": "original", "replace": "new", "added": "yes"},
+				s.releaseValues("release-to-upgrade", 2))
+		})
+	})
+	s.Run("helm_upgrade(reuse_values=false) replaces the values", func() {
+		toolResult, err := s.CallTool("helm_upgrade", map[string]interface{}{
+			"name":         "release-to-upgrade",
+			"chart":        chartPath,
+			"values":       map[string]interface{}{"only": "this"},
+			"reuse_values": false,
+		})
+		s.Nilf(err, "call tool failed %v", err)
+		s.Falsef(toolResult.IsError, "call tool failed: %v", toolResult.Content)
+		s.Equal(map[string]interface{}{"only": "this"}, s.releaseValues("release-to-upgrade", 3))
+	})
+}
+
+func (s *HelmSuite) TestHelmUpgradeMissingRelease() {
+	s.InitMcpClient()
+	_, file, _, _ := runtime.Caller(0)
+	toolResult, err := s.CallTool("helm_upgrade", map[string]interface{}{
+		"name":  "not-installed",
+		"chart": filepath.Join(filepath.Dir(file), "testdata", "helm-chart-no-op"),
+	})
+	s.Nilf(err, "call tool should not return error object")
+	s.Truef(toolResult.IsError, "upgrading a missing release should fail")
+	s.Contains(toolResult.Content[0].(*mcp.TextContent).Text, "failed to upgrade helm release 'not-installed'")
+}
+
+func (s *HelmSuite) TestHelmUpgradeBlockedScheme() {
+	s.InitMcpClient()
+	toolResult, err := s.CallTool("helm_upgrade", map[string]interface{}{
+		"name":  "any",
+		"chart": "http://example.com/chart.tgz",
+	})
+	s.Nilf(err, "call tool should not return error object")
+	s.Truef(toolResult.IsError, "http charts should be refused")
+	s.Contains(toolResult.Content[0].(*mcp.TextContent).Text, "http:// scheme is blocked")
+}
+
+func (s *HelmSuite) TestHelmRollbackAndHistory() {
+	s.InitMcpClient()
+	chartPath := s.installNoOp("release-to-roll-back")
+	toolResult, err := s.CallTool("helm_upgrade", map[string]interface{}{
+		"name":   "release-to-roll-back",
+		"chart":  chartPath,
+		"values": map[string]interface{}{"replace": "broken"},
+	})
+	s.Require().NoError(err)
+	s.Require().Falsef(toolResult.IsError, "upgrade failed: %v", toolResult.Content)
+
+	s.Run("helm_rollback(name=release-to-roll-back) returns to the previous revision", func() {
+		toolResult, err := s.CallTool("helm_rollback", map[string]interface{}{"name": "release-to-roll-back"})
+		s.Run("no error", func() {
+			s.Nilf(err, "call tool failed %v", err)
+			s.Falsef(toolResult.IsError, "call tool failed: %v", toolResult.Content)
+		})
+		s.Run("creates revision 3 with revision 1's values", func() {
+			var decoded []map[string]interface{}
+			s.Require().NoError(yaml.Unmarshal([]byte(toolResult.Content[0].(*mcp.TextContent).Text), &decoded))
+			s.Require().Len(decoded, 1)
+			s.Equal(float64(3), decoded[0]["revision"])
+			s.Equal("deployed", decoded[0]["status"])
+			s.Equal(map[string]interface{}{"keep": "original", "replace": "old"},
+				s.releaseValues("release-to-roll-back", 3))
+		})
+	})
+	s.Run("helm_history(name=release-to-roll-back) lists every revision in order", func() {
+		toolResult, err := s.CallTool("helm_history", map[string]interface{}{"name": "release-to-roll-back"})
+		s.Nilf(err, "call tool failed %v", err)
+		s.Falsef(toolResult.IsError, "call tool failed: %v", toolResult.Content)
+		var decoded []map[string]interface{}
+		s.Require().NoError(yaml.Unmarshal([]byte(toolResult.Content[0].(*mcp.TextContent).Text), &decoded))
+		s.Require().Len(decoded, 3)
+		for i, rev := range decoded {
+			s.Equal(float64(i+1), rev["revision"])
+		}
+		s.Equal("superseded", decoded[0]["status"])
+		s.Equal("Upgrade complete", decoded[1]["description"])
+		s.Equal("Rollback to 1", decoded[2]["description"])
+		s.Equal("deployed", decoded[2]["status"])
+	})
+	s.Run("helm_history(max=1) returns only the latest revision", func() {
+		toolResult, err := s.CallTool("helm_history", map[string]interface{}{"name": "release-to-roll-back", "max": 1})
+		s.Nilf(err, "call tool failed %v", err)
+		var decoded []map[string]interface{}
+		s.Require().NoError(yaml.Unmarshal([]byte(toolResult.Content[0].(*mcp.TextContent).Text), &decoded))
+		s.Require().Len(decoded, 1)
+		s.Equal(float64(3), decoded[0]["revision"])
+	})
+	s.Run("helm_rollback(revision=-1) is refused", func() {
+		toolResult, err := s.CallTool("helm_rollback", map[string]interface{}{"name": "release-to-roll-back", "revision": -1})
+		s.Nilf(err, "call tool should not return error object")
+		s.Truef(toolResult.IsError, "negative revision should fail")
+	})
+}
+
+func (s *HelmSuite) TestHelmHistoryMissingRelease() {
+	s.InitMcpClient()
+	toolResult, err := s.CallTool("helm_history", map[string]interface{}{"name": "never-installed"})
+	s.Nilf(err, "call tool should not return error object")
+	s.Truef(toolResult.IsError, "history of a missing release should fail")
+	s.Contains(toolResult.Content[0].(*mcp.TextContent).Text, "release: not found")
 }
 
 func clearHelmReleases(ctx context.Context, kc *kubernetes.Clientset) {

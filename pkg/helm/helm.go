@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -113,6 +114,97 @@ func (h *Helm) Uninstall(ctx context.Context, name string, namespace string) (st
 	return fmt.Sprintf("Uninstalled release %s %s", uninstalledRelease.Release.Name, uninstalledRelease.Info), nil
 }
 
+// Upgrade upgrades an existing release to the given chart. With reuseValues the
+// release's current values are kept and values are merged over them (helm
+// upgrade --reuse-values --set ...); without it values replace them, on top of
+// the chart defaults.
+func (h *Helm) Upgrade(ctx context.Context, name string, chart string, version string, values map[string]interface{}, namespace string, reuseValues bool) (string, error) {
+	if err := validateChartReference(chart, h.config); err != nil {
+		return "", err
+	}
+	cfg, err := h.newAction(ctx, h.kubernetes.NamespaceOrDefault(namespace), false)
+	if err != nil {
+		return "", err
+	}
+	upgrade := action.NewUpgrade(cfg)
+	upgrade.Namespace = h.kubernetes.NamespaceOrDefault(namespace)
+	upgrade.Version = version
+	upgrade.ReuseValues = reuseValues
+	upgrade.ResetValues = !reuseValues
+	upgrade.Wait = true
+	upgrade.Timeout = 5 * time.Minute
+
+	chartRequested, err := upgrade.LocateChart(chart, cli.New())
+	if err != nil {
+		return "", err
+	}
+	chartLoaded, err := loader.Load(chartRequested)
+	if err != nil {
+		return "", err
+	}
+
+	upgradedRelease, err := upgrade.RunWithContext(ctx, name, chartLoaded, values)
+	if err != nil {
+		return "", err
+	}
+	ret, err := yaml.Marshal(simplify(upgradedRelease))
+	if err != nil {
+		return "", err
+	}
+	return string(ret), nil
+}
+
+// Rollback rolls a release back to revision, or to the previous revision when
+// revision is 0.
+func (h *Helm) Rollback(ctx context.Context, name string, revision int, namespace string) (string, error) {
+	cfg, err := h.newAction(ctx, h.kubernetes.NamespaceOrDefault(namespace), false)
+	if err != nil {
+		return "", err
+	}
+	rollback := action.NewRollback(cfg)
+	rollback.Version = revision
+	rollback.Wait = true
+	rollback.Timeout = 5 * time.Minute
+	if err := rollback.Run(name); err != nil {
+		return "", err
+	}
+	current, err := action.NewStatus(cfg).Run(name)
+	if err != nil {
+		return "", err
+	}
+	ret, err := yaml.Marshal(simplify(current))
+	if err != nil {
+		return "", err
+	}
+	return string(ret), nil
+}
+
+// History lists the revisions of a release, oldest first, at most max of the
+// most recent ones (all when max is 0).
+func (h *Helm) History(ctx context.Context, name string, namespace string, max int) (string, error) {
+	cfg, err := h.newAction(ctx, h.kubernetes.NamespaceOrDefault(namespace), false)
+	if err != nil {
+		return "", err
+	}
+	releases, err := action.NewHistory(cfg).Run(name)
+	if err != nil {
+		return "", err
+	}
+	if len(releases) == 0 {
+		return fmt.Sprintf("Release %s not found", name), nil
+	}
+	// action.History.Max is only applied by the helm CLI, not by Run.
+	sort.Slice(releases, func(i, j int) bool { return releases[i].Version < releases[j].Version })
+	if max > 0 && len(releases) > max {
+		releases = releases[len(releases)-max:]
+	}
+	ret, err := yaml.Marshal(simplifyHistory(releases...))
+	if err != nil {
+		return "", err
+	}
+	return string(ret), nil
+}
+
 func (h *Helm) newAction(ctx context.Context, namespace string, allNamespaces bool) (*action.Configuration, error) {
 	storageDriver := ""
 	if h.config != nil {
@@ -193,6 +285,18 @@ func simplify(release ...*release.Release) []map[string]interface{} {
 			if !r.Info.LastDeployed.IsZero() {
 				ret[i]["lastDeployed"] = r.Info.LastDeployed.Format(time.RFC1123Z)
 			}
+		}
+	}
+	return ret
+}
+
+// simplifyHistory is simplify plus the description Helm records per revision
+// ("Upgrade complete", "Rollback to 3", ...), which is what tells revisions apart.
+func simplifyHistory(releases ...*release.Release) []map[string]interface{} {
+	ret := simplify(releases...)
+	for i, r := range releases {
+		if r.Info != nil && r.Info.Description != "" {
+			ret[i]["description"] = r.Info.Description
 		}
 	}
 	return ret

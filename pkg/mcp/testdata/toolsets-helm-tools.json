@@ -2,6 +2,57 @@
   {
     "_meta": {
       "io.kubernetes-mcp-server/rbac": {
+        "bounded": {
+          "requirements": [
+            {
+              "target": {
+                "resource": {
+                  "resource": "secrets"
+                }
+              },
+              "verbs": [
+                "list"
+              ]
+            }
+          ]
+        },
+        "version": "v1alpha1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": true,
+      "title": "Helm: History"
+    },
+    "description": "List the revisions of a Helm release (chart version, status and description of each) in the current or provided namespace",
+    "inputSchema": {
+      "properties": {
+        "max": {
+          "description": "Maximum number of most recent revisions to return (Optional, all if not provided)",
+          "type": "integer"
+        },
+        "name": {
+          "description": "Name of the Helm release",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Namespace of the Helm release (Optional, current namespace if not provided)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "helm_history",
+    "title": "Helm: History"
+  },
+  {
+    "_meta": {
+      "io.kubernetes-mcp-server/rbac": {
         "unbounded": {
           "reason": "Permissions depend on resources contained in the referenced Helm chart"
         },
@@ -108,6 +159,46 @@
     "_meta": {
       "io.kubernetes-mcp-server/rbac": {
         "unbounded": {
+          "reason": "Permissions depend on resources contained in the Helm release"
+        },
+        "version": "v1alpha1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false,
+      "title": "Helm: Rollback"
+    },
+    "description": "Roll back a Helm release to a previous revision in the current or provided namespace",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "description": "Name of the Helm release to roll back",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Namespace of the Helm release (Optional, current namespace if not provided)",
+          "type": "string"
+        },
+        "revision": {
+          "description": "Revision to roll back to (Optional, the previous revision if not provided). See helm_history",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "helm_rollback",
+    "title": "Helm: Rollback"
+  },
+  {
+    "_meta": {
+      "io.kubernetes-mcp-server/rbac": {
+        "unbounded": {
           "reason": "Permissions depend on resources contained in the installed Helm release"
         },
         "version": "v1alpha1"
@@ -139,5 +230,59 @@
     },
     "name": "helm_uninstall",
     "title": "Helm: Uninstall"
+  },
+  {
+    "_meta": {
+      "io.kubernetes-mcp-server/rbac": {
+        "unbounded": {
+          "reason": "Permissions depend on resources contained in the referenced Helm chart"
+        },
+        "version": "v1alpha1"
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false,
+      "title": "Helm: Upgrade"
+    },
+    "description": "Upgrade an existing Helm release to a chart version and/or new values in the current or provided namespace. By default the release's current values are kept and the provided values are merged over them (like helm upgrade --reuse-values)",
+    "inputSchema": {
+      "properties": {
+        "chart": {
+          "description": "Chart reference to upgrade to (for example: stable/grafana, oci://ghcr.io/nginxinc/charts/nginx-ingress, https://example.com/charts/app-1.2.3.tgz)",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name of the Helm release to upgrade",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "Namespace of the Helm release (Optional, current namespace if not provided)",
+          "type": "string"
+        },
+        "reuse_values": {
+          "description": "Keep the release's current values and merge the provided values over them (Optional, default true). If false, only the chart defaults plus the provided values are used",
+          "type": "boolean"
+        },
+        "values": {
+          "description": "Values to set on the release (Optional). Merged over the current values unless reuse_values is false",
+          "properties": {},
+          "type": "object"
+        },
+        "version": {
+          "description": "Chart version to upgrade to, for repository and OCI references (Optional, latest if not provided)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "chart"
+      ],
+      "type": "object"
+    },
+    "name": "helm_upgrade",
+    "title": "Helm: Upgrade"
   }
 ]

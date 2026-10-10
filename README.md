@@ -438,6 +438,24 @@ In case multi-cluster support is enabled (default) and you have access to multip
   - `name` (`string`) **(required)** - Name of the Helm release to uninstall
   - `namespace` (`string`) - Namespace to uninstall the Helm release from (Optional, current namespace if not provided)
 
+- **helm_upgrade** - Upgrade an existing Helm release to a chart version and/or new values in the current or provided namespace. By default the release's current values are kept and the provided values are merged over them (like helm upgrade --reuse-values)
+  - `chart` (`string`) **(required)** - Chart reference to upgrade to (for example: stable/grafana, oci://ghcr.io/nginxinc/charts/nginx-ingress, https://example.com/charts/app-1.2.3.tgz)
+  - `name` (`string`) **(required)** - Name of the Helm release to upgrade
+  - `namespace` (`string`) - Namespace of the Helm release (Optional, current namespace if not provided)
+  - `reuse_values` (`boolean`) - Keep the release's current values and merge the provided values over them (Optional, default true). If false, only the chart defaults plus the provided values are used
+  - `values` (`object`) - Values to set on the release (Optional). Merged over the current values unless reuse_values is false
+  - `version` (`string`) - Chart version to upgrade to, for repository and OCI references (Optional, latest if not provided)
+
+- **helm_rollback** - Roll back a Helm release to a previous revision in the current or provided namespace
+  - `name` (`string`) **(required)** - Name of the Helm release to roll back
+  - `namespace` (`string`) - Namespace of the Helm release (Optional, current namespace if not provided)
+  - `revision` (`integer`) - Revision to roll back to (Optional, the previous revision if not provided). See helm_history
+
+- **helm_history** - List the revisions of a Helm release (chart version, status and description of each) in the current or provided namespace
+  - `max` (`integer`) - Maximum number of most recent revisions to return (Optional, all if not provided)
+  - `name` (`string`) **(required)** - Name of the Helm release
+  - `namespace` (`string`) - Namespace of the Helm release (Optional, current namespace if not provided)
+
 </details>
 
 <details>
