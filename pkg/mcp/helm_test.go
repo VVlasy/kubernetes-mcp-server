@@ -496,6 +496,39 @@ func (s *HelmSuite) TestHelmRollbackAndHistory() {
 	})
 }
 
+func (s *HelmSuite) TestHelmResourcesLandInReleaseNamespace() {
+	s.InitMcpClient()
+	kc := kubernetes.NewForConfigOrDie(test.EnvTestRestConfig())
+	s.T().Cleanup(func() {
+		ctx := context.Background()
+		for _, ns := range []string{"default", "ns-1"} {
+			secrets, _ := kc.CoreV1().Secrets(ns).List(ctx, metav1.ListOptions{})
+			for _, secret := range secrets.Items {
+				if strings.Contains(secret.Name, "release-in-ns-1") {
+					_ = kc.CoreV1().Secrets(ns).Delete(ctx, secret.Name, metav1.DeleteOptions{})
+				}
+			}
+		}
+	})
+	_, file, _, _ := runtime.Caller(0)
+	chartPath := filepath.Join(filepath.Dir(file), "testdata", "helm-chart-secret")
+	for _, tool := range []string{"helm_install", "helm_upgrade"} {
+		s.Run(tool+"(namespace=ns-1) creates the chart's resources in ns-1", func() {
+			toolResult, err := s.CallTool(tool, map[string]interface{}{
+				"chart":     chartPath,
+				"name":      "release-in-ns-1",
+				"namespace": "ns-1",
+			})
+			s.Require().NoError(err)
+			s.Require().Falsef(toolResult.IsError, "call tool failed: %v", toolResult.Content)
+			_, err = kc.CoreV1().Secrets("ns-1").Get(s.T().Context(), "release-in-ns-1-secret", metav1.GetOptions{})
+			s.NoError(err, "chart resource missing from the release namespace")
+			_, err = kc.CoreV1().Secrets("default").Get(s.T().Context(), "release-in-ns-1-secret", metav1.GetOptions{})
+			s.Truef(errors.IsNotFound(err), "chart resource leaked into the default namespace: %v", err)
+		})
+	}
+}
+
 func (s *HelmSuite) TestHelmHistoryMissingRelease() {
 	s.InitMcpClient()
 	toolResult, err := s.CallTool("helm_history", map[string]interface{}{"name": "never-installed"})

@@ -12,6 +12,7 @@ import (
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
+	"helm.sh/helm/v3/pkg/kube"
 	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/release"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -221,11 +222,21 @@ func (h *Helm) newAction(ctx context.Context, namespace string, allNamespaces bo
 	}
 	cfg.RegistryClient = registryClient
 	logger := klogutil.FromContext(ctx)
-	return cfg, cfg.Init(h.kubernetes, applicableNamespace, storageDriver, func(format string, v ...any) {
+	if err := cfg.Init(h.kubernetes, applicableNamespace, storageDriver, func(format string, v ...any) {
 		if logger.V(5).Enabled() {
 			logger.V(5).Info(fmt.Sprintf(format, v...))
 		}
-	})
+	}); err != nil {
+		return nil, err
+	}
+	// Init only scopes the release storage to the namespace. The kube client
+	// still resolves the namespace of chart resources from the RESTClientGetter
+	// (the kubeconfig context, "default" in-cluster), so without this the
+	// resources land in a different namespace than the release.
+	if kc, ok := cfg.KubeClient.(*kube.Client); ok && applicableNamespace != "" {
+		kc.Namespace = applicableNamespace
+	}
+	return cfg, nil
 }
 
 // validateChartReference blocks chart references using dangerous URL schemes.
